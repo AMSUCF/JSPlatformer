@@ -52,6 +52,11 @@ function Level(plan) {
   })[0];
 }
 
+// Check if level is finished
+Level.prototype.isFinished = function() {
+  return this.status != null && this.finishDelay < 0;
+};
+
 function Vector(x, y) {
   this.x = x; this.y = y;
 }
@@ -166,6 +171,8 @@ DOMDisplay.prototype.drawFrame = function() {
   if (this.actorLayer)
     this.wrap.removeChild(this.actorLayer);
   this.actorLayer = this.wrap.appendChild(this.drawActors());
+  // Update the status each time with this.level.status"
+  this.wrap.className = "game " + (this.level.status || "");
   this.scrollPlayerIntoView();
 };
 
@@ -195,6 +202,12 @@ DOMDisplay.prototype.scrollPlayerIntoView = function() {
     this.wrap.scrollTop = center.y + margin - height;
 };
 
+// Remove the wrap element when clearing the display
+// This will be garbage collected
+DOMDisplay.prototype.clear = function() {
+  this.wrap.parentNode.removeChild(this.wrap);
+};
+
 // Return the first obstacle found given a size and position.
 Level.prototype.obstacleAt = function(pos, size) {
   // Find the "coordinate" of the tile representing left bound
@@ -207,8 +220,10 @@ Level.prototype.obstacleAt = function(pos, size) {
   var yEnd = Math.ceil(pos.y + size.y);
 
   // Consider the sides and top and bottom of the level as walls
-  if (xStart < 0 || xEnd > this.width || yStart < 0 || yEnd > this.height)
+  if (xStart < 0 || xEnd > this.width || yStart < 0)
     return "wall";
+  if (yEnd > this.height)
+    return "lava";
 
   // Check each grid position starting at yStart, xStart
   // for a possible obstacle (non null value)
@@ -241,6 +256,9 @@ Level.prototype.actorAt = function(actor) {
 
 // Update simulation each step based on keys & step size
 Level.prototype.animate = function(step, keys) {
+  // Have game continue past point of win or loss
+  if (this.status != null)
+    this.finishDelay -= step;
 
   // Ensure each is maximum 100 milliseconds 
   while (step > 0) {
@@ -300,9 +318,11 @@ Player.prototype.moveX = function(step, level, keys) {
   var newPos = this.pos.plus(motion);
   // Find if there's an obstacle there
   var obstacle = level.obstacleAt(newPos, this.size);
-
-  // Move if there's not a wall there.
-  if(obstacle!="wall")
+  // Handle lava by calling playerTouched
+  if (obstacle)
+    level.playerTouched(obstacle);
+  else
+    // Move if there's not an obstacle there.
     this.pos = newPos;
 };
 
@@ -318,6 +338,7 @@ Player.prototype.moveY = function(step, level, keys) {
   // The floor is also an obstacle -- only allow players to 
   // jump if they are touching some obstacle.
   if (obstacle) {
+    level.playerTouched(obstacle);
     if (keys.up && this.speed.y > 0)
       this.speed.y = -jumpSpeed;
     else
@@ -334,14 +355,32 @@ Player.prototype.act = function(step, level, keys) {
   var otherActor = level.actorAt(this);
   if (otherActor)
     level.playerTouched(otherActor.type, otherActor);
+
+  // Losing animation
+  if (level.status == "lost") {
+    this.pos.y += step;
+    this.size.y -= step;
+  }
 };
 
 Level.prototype.playerTouched = function(type, actor) {
 
-  if (type == "coin") {
+  // if the player touches lava and the player hasn't won
+  // Player loses
+  if (type == "lava" && this.status == null) {
+    this.status = "lost";
+    this.finishDelay = 1;
+  } else if (type == "coin") {
     this.actors = this.actors.filter(function(other) {
       return other != actor;
     });
+    // If there aren't any coins left, player wins
+    if (!this.actors.some(function(actor) {
+           return actor.type == "coin";
+         })) {
+      this.status = "won";
+      this.finishDelay = 1;
+    }
   }
 };
 
@@ -396,13 +435,19 @@ function runAnimation(frameFunc) {
 var arrows = trackKeys(arrowCodes);
 
 // Organize a single level and begin animation
-function runLevel(level, Display) {
+function runLevel(level, Display, andThen) {
   var display = new Display(document.body, level);
 
   runAnimation(function(step) {
     // Allow the viewer to scroll the level
     level.animate(step, arrows);
     display.drawFrame(step);
+    if (level.isFinished()) {
+      display.clear();
+      if (andThen)
+        andThen(level.status);
+      return false;
+    }
   });
 }
 
@@ -410,7 +455,14 @@ function runGame(plans, Display) {
   function startLevel(n) {
     // Create a new level using the nth element of array plans
     // Pass in a reference to Display function, DOMDisplay (in index.html).
-    runLevel(new Level(plans[n]), Display);
+    runLevel(new Level(plans[n]), Display, function(status) {
+      if (status == "lost")
+        startLevel(n);
+      else if (n < plans.length - 1)
+        startLevel(n + 1);
+      else
+        console.log("You win!");
+    });
   }
   startLevel(0);
 }
